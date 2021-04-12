@@ -6,6 +6,8 @@ import tkinter.messagebox
 from osgeo import gdal
 from osgeo import ogr, osr
 import numpy as np
+from numpy import zeros
+from numpy import logical_and
 import rasterio as rio
 from rasterstats import zonal_stats
 
@@ -37,8 +39,9 @@ class Application(tk.Frame):
             var_4.set(askinteger(title="Input the highest value in the raster classification range you want to analyze"))
 
         ##  G-5. Run the Script
-        def OK():
-            ##  Set input variables
+        def OK():       
+            
+            ##  Define input variables
             input_zone_polygon = var_1.get()
             input_value_raster = var_2.get()
             low_class_str = var_3.get()
@@ -57,7 +60,7 @@ class Application(tk.Frame):
                 print("Error: Input the lowest value in the raster classification range you want to analyze")
             if high_class_int == "":
                 print("Error: Input the highest value in the raster classification range you want to analyze")
-
+            
             print('Retrieving the directory path for the input raster.')
 
             ## Get the directory path of the input raster
@@ -76,33 +79,69 @@ class Application(tk.Frame):
                 drive = 'HFA'
             else:
                 print('Error: The input raster file needs to be in .tif or .img format.')
-
+                
             print('Reclassifying the raster to a binary 0,1 classification...')
+            
             #Define the gdal driver with the drive variable from the conditional test
             driver = gdal.GetDriverByName(drive)
 
             file = gdal.Open(input_value_raster)
             band = file.GetRasterBand(1)
-            lista = band.ReadAsArray()
-
+            
             # reclassification
-            lista[np.where( lista < low_class_int )] = 0
-            lista[np.where((low_class_int - 1 < lista) & (lista < high_class_int + 1)) ] = 1
-            lista[np.where( lista > high_class_int )] = 0
+            classification_values = [0,low_class_int,high_class_int + 1]
+            classification_output_values = [0,1,0]
+
+            block_sizes = band.GetBlockSize()
+            x_block_size = block_sizes[0]
+            y_block_size = block_sizes[1]
+
+            xsize = band.XSize
+            ysize = band.YSize
+
+            max_value = band.GetMaximum()
+            min_value = band.GetMinimum()
+
+            if max_value == None or min_value == None:
+                stats = band.GetStatistics(0, 1)
+                max_value = stats[1]
+                min_value = stats[0]
 
             # create new file
-            file2 = driver.Create( ras_dir_path + '/raster2.img', file.RasterXSize , file.RasterYSize , 1)
-            file2.GetRasterBand(1).WriteArray(lista)
+            file2 = driver.Create( ras_dir_path + '/raster2' + file_ext, xsize , ysize , 1, gdal.GDT_Byte)
 
             # spatial ref system
-            proj = file.GetProjection()
-            georef = file.GetGeoTransform()
-            file2.SetProjection(proj)
-            file2.SetGeoTransform(georef)
+            file2.SetGeoTransform(file.GetGeoTransform())
+            file2.SetProjection(file.GetProjection())
+
+            print('Reassigning raster values...please wait...')
+            for i in range(0, ysize, y_block_size):
+                if i + y_block_size < ysize:
+                    rows = y_block_size
+                else:
+                    rows = ysize - i
+                for j in range(0, xsize, x_block_size):
+                    if j + x_block_size < xsize:
+                        cols = x_block_size
+                    else:
+                        cols = xsize - j
+
+                    data = band.ReadAsArray(j, i, cols, rows)
+                    r = zeros((rows, cols), np.uint8)
+
+                    for k in range(len(classification_values) - 1):
+                        if classification_values[k] <= max_value and (classification_values[k + 1] > min_value ):
+                            r = r + classification_output_values[k] * logical_and(data >= classification_values[k], data < classification_values[k + 1])
+                    if classification_values[k + 1] < max_value:
+                        r = r + classification_output_values[k+1] * (data >= classification_values[k + 1])
+
+                    file2.GetRasterBand(1).WriteArray(r,j,i)
+
             file2 = None
 
             print('Done reclassifying the raster. Reprojecting the raster to the shapefile projection...')
-
+            print('Identifying the EPSG code of the input SHP')
+            
             # Get the EPSG code of the input shapefile
             shp_driver = ogr.GetDriverByName('ESRI Shapefile')
             dataset = shp_driver.Open(input_zone_polygon)
@@ -110,15 +149,18 @@ class Application(tk.Frame):
             spatialRef = layer.GetSpatialRef()
             shp_epsg = spatialRef.GetAttrValue("GEOGCS|AUTHORITY", 1)
 
-            print('Shapefile projection is EPSG:' + shp_epsg + '. Reprojecting the raster to match...')
+            print('Shapefile projection is EPSG:' + shp_epsg + '.')
+            print('Reprojecting the raster to match SHP...please wait...')
+
             # Reproject the raster
-            input_raster = gdal.Open(ras_dir_path + '/raster2.img')
-            output_raster = ras_dir_path + '/raster2_reproject.img'
+            input_raster = gdal.Open(ras_dir_path + '/raster2' + file_ext)
+            output_raster = ras_dir_path + '/raster2_reproject' + file_ext
 
             warp = gdal.Warp(output_raster,input_raster,dstSRS='EPSG:'+str(shp_epsg))
             warp = None
 
             print('Done reprojecting. Processing zonal statistics...')
+            
             zs = zonal_stats(input_zone_polygon,output_raster,stats=['min', 'max', 'mean', 'count', 'sum'])
 
             print(zs)
@@ -141,7 +183,7 @@ class Application(tk.Frame):
             tk.messagebox.showinfo("Zonal Statistics Summary", "\n".join(lines))
 
             print('All done processing!')
-
+            
         self.quit()
 
 
